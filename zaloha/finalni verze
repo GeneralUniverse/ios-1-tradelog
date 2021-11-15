@@ -1,0 +1,399 @@
+#!/bin/sh
+########################################
+#        Author: Dominik Klon          #
+#      Last modified: 6.4.2021         #
+#        More info in manual           #
+########################################
+
+export POSIXLY_CORRECT=yes
+export LC_NUMERIC=en_US.UTF-8
+############
+#  MANUAL  #
+############
+printMan(){
+    echo "JMÉNO"
+    echo "  tradelog"
+    echo
+    echo "POUŽITÍ"
+    echo "  tradelog [-h|--help] [FILTR] [PŘÍKAZ] [LOG [LOG2 [...]]"
+    echo
+    echo "VOLBY"
+    echo "  PŘÍKAZ může být jeden z:"
+    echo '      list-tick   – výpis seznamu vyskytujících se burzovních symbolů, tzv. “tickerů”.'
+    echo "      profit      – výpis celkového zisku z uzavřených pozic."
+    echo "      pos         – výpis hodnot aktuálně držených pozic seřazených sestupně dle hodnoty."
+    echo "      last-price  – výpis poslední známé ceny pro každý ticker."
+    echo "      hist-ord    – výpis histogramu počtu transakcí dle tickeru."
+    echo "      graph-pos   – výpis grafu hodnot držených pozic dle tickeru."
+    echo 
+    echo "  FILTR může být kombinace následujících:"
+    echo "      -a DATETIME – after: jsou uvažovány pouze záznamy PO tomto datu (bez tohoto data)."
+    echo "                    DATETIME je formátu YYYY-MM-DD HH:MM:SS."
+    echo "      -b DATETIME – before: jsou uvažovány pouze záznamy PŘED tímto datem (bez tohoto data)."
+    echo "      -t TICKER   – jsou uvažovány pouze záznamy odpovídající danému tickeru."
+    echo "                    Při více výskytech přepínače se bere množina všech uvedených tickerů."
+    echo "      -w WIDTH    – u výpisu grafů nastavuje jejich šířku, tedy délku nejdelšího řádku na WIDTH."
+    echo "                    Tedy, WIDTH musí být kladné celé číslo. Více výskytů přepínače je chybné spuštění."
+    echo "      -h a --help – vypíšou nápovědu s krátkým popisem každého příkazu a přepínače."
+}
+
+#vyhleda a nahraje obsah souboru do $read
+read=""
+for var in "$@"
+do 
+    case $var in
+    *.txt|*.log)
+        read="$read$(cat "$var")"
+        ;;
+    *.gz)
+        read="$read$(gzip -d -c "$var")"
+     esac
+done
+#nahraje do $read stdin pouze pokud existuje
+if [ ! \( -t 0 \)  ];then
+read=$read$(cat)
+fi
+# Odstrani duplicitni radky
+read=$(echo "$read" | sort -u|\
+    awk '{print}'
+)
+outLogs=$read
+width=0
+while [ "$#" -gt 0 ]; do  
+#switch, ktery porovna argumenty a posune se na dalsi
+#switch ma za dusledek, ze na konci cyklu nezbydou zadne argumenty  
+    case "$1" in
+        -h|--help)
+            printMan
+            exit 0
+            ;;
+    #########################
+    #         FILTRY        #
+    #########################
+        -a)
+            afterDt=$(echo "$outLogs"|\
+                awk -F ';' \
+                -v userDt="$2"\
+                '{
+                    tickerDt=$1
+                    if(userDt<tickerDt){
+                    print 
+                    }
+                }')   
+                outLogs=$afterDt  
+                shift;shift 
+                ;; 
+        -b)
+        beforeDt=$(echo "$outLogs"|\
+                awk -F ';' \
+                -v userDt="$2"\
+                '{
+                    logDt=$1
+                    if(userDt>logDt){
+                    print 
+                    }
+                }')   
+                outLogs=$beforeDt   
+                shift;shift  
+                ;; 
+        -t)   
+        #while cyklus aby dokazal zpracovat vic nez jeden parametr
+            while [ "$1" = "-t" ];do
+                tkrs="$tkrs $2"
+                shift;shift
+                done
+                tkr="$(echo "$outLogs"|\
+                awk -F ';' \
+                -v userTkr="$tkrs"\
+                '{
+                    logTkr=$2
+                    split(userTkr,poleTkr," ")
+                    for(i in poleTkr){
+                        if(poleTkr[i] == logTkr){
+                        print 
+                        }
+                    }   
+                }')"  
+            outLogs=$tkr
+            ;;   
+        -w) 
+        #urcuje sirku max radku
+            width=$2
+            shift
+            ;;
+    #########################
+    #       PRIKAZY         #
+    #########################
+        list-tick)
+                listTick=$(echo "$outLogs" | \
+                awk -F ';' '{
+                    if(a[$2]++ == 0){
+                    print $2;}
+                    }')
+                    listTick=$(echo "$listTick" |sort -t " " -b -d -f| \
+                    awk -F ' ' '{
+                        print $1
+                    }')
+                outLogs=$listTick 
+                shift
+                ;;
+            profit)
+                profit=$(echo "$outLogs"|\
+                awk -F ';' \
+                'BEGIN{
+                    sellTr=0
+                    buyTr=0
+                }
+                { 
+                    if($3=="sell"){
+                        sellTr=sellTr+($4*$6)
+                    }
+                    if($3=="buy"){
+                        buyTr=buyTr+($4*$6)
+                    }                   
+                } END {
+                    profit=sellTr-buyTr
+                    printf("%.2f\n",profit) 
+                }')
+                outLogs=$profit
+                shift
+                ;;
+            pos)
+                pos=$(echo "$outLogs"|sort -t ";" -r -d|\
+                awk -F ';' \
+                '{
+                    if(a[$2]++ == 0 ){
+                        lastPrice[$2]+=$4
+                    }
+                    if($3=="buy"){
+                        obj[$2]+=$6
+                    }
+                    else{
+                        obj[$2]-=$6
+                    }
+                }
+                END{
+                    maxLen=0
+                    for(tkr in obj){
+                        val=lastPrice[tkr]*obj[tkr]
+                        val=sprintf("%.2f",val)
+                        if(maxLen<length(val)){
+                            maxLen=length(val) 
+                        }
+                    }
+                    for (tkr in obj){
+                        addSpaceT=""
+                        for (i=length(tkr);i<10;i++){
+                            addSpaceT=addSpaceT" "
+                        }
+                        val=lastPrice[tkr]*obj[tkr]
+                        val=sprintf("%.2f",val)
+                        aSN=""
+                        for(i=length(val);i<maxLen;i++){
+                            aSN=aSN" "
+                        }
+                        printf("%s%s: %s%.2f\n",tkr,addSpaceT,aSN,val)
+                    }
+                }'|sort -t ":" -n -k2 -r)
+                outLogs="$pos"
+                shift
+                ;;
+            last-price)
+            #temer copy posu, protoze je to v podstate to same, s jinym sortem a bez nasobeni objemem
+                lastPrice=$(echo "$outLogs" | sort -t ";" -r -d|\
+                awk -F ';' '{
+                    if(a[$2]++ == 0 ){
+                        lastPrice[$2]+=$4
+                    }
+                }
+                END{
+                    maxLen=0
+                    for(tkr in lastPrice){
+                        val=lastPrice[tkr]
+                        val=sprintf("%.2f",val)
+                        if(maxLen<length(val)){
+                            maxLen=length(val) 
+                        }
+                    }
+                    for (tkr in lastPrice){
+                        addSpaceT=""
+                        for (i=length(tkr);i<10;i++){
+                            addSpaceT=addSpaceT" "
+                        }
+                        val=lastPrice[tkr]
+                        val=sprintf("%.2f",val)
+                        aSN=""
+                        for(i=length(val);i<maxLen;i++){
+                            aSN=aSN" "
+                        }
+                        printf("%s%s: %s%.2f\n",tkr,addSpaceT,aSN,val)
+                    }
+                }'|sort -t ":" -k1 -d )
+                outLogs=$lastPrice  
+                shift
+                ;;
+            hist-ord)
+                if [ "$width" -eq 0 ];then
+                #v awk pouzivam lastPrice pole protoze je to nakopirovane a upravene z lastPrice
+                    histOrd=$(echo "$outLogs" | sort -t ";" -r -d|\
+                    awk -F ';' '{
+                            lastPrice[$2]+=1
+                    }
+                    END{
+                        for (tkr in lastPrice){
+                            addSpaceT=""
+                            addHash=""
+                            val = lastPrice[tkr]
+                            for (i=length(tkr);i<10;i++){
+                                addSpaceT=addSpaceT" "
+                            }
+                            for (i=0;i<val;i++){
+                                addHash=addHash"#"
+                            }  
+                            printf("%s%s: %s%s\n",tkr,addSpaceT,aSN,addHash)
+                        }
+                    }'|sort -t ":" -k1 -d )
+                else
+                histOrd=$(echo "$outLogs" | sort -t ";" -r -d|\
+                    awk -F ';'\
+                    -v width="$width" \
+                    '{
+                            lastPrice[$2]+=1
+                    }
+                    END{
+                        maxVal=0
+                        for (tkr in lastPrice){
+                            val = lastPrice[tkr]
+                            if(maxVal<val){
+                                maxVal=val
+                            }
+                        }
+                        for (tkr in lastPrice){
+                            addSpaceT=""
+                            addHash=""
+                            val = lastPrice[tkr]
+                            for (i=length(tkr);i<10;i++){
+                                addSpaceT=addSpaceT" "
+                            }
+                            for (i=0;i<(val/maxVal)*width;i++){
+                                addHash=addHash"#"
+                            }  
+                            printf("%s%s: %s%s\n",tkr,addSpaceT,aSN,addHash)
+                        }
+                    }'|sort -t ":" -k1 -d )
+                fi
+                outLogs=$histOrd
+                shift
+                ;;
+            graph-pos)
+            #lastPrice protoze je to nakopirovane a upravene stejne jako hist-ord
+                if [ "$width" -eq 0 ];then
+                    graphPos=$(echo "$outLogs"|sort -t ";" -r -d|\
+                    awk -F ';' \
+                    '{
+                        if(a[$2]++ == 0 ){
+                            lastPrice[$2]+=$4
+                        }
+                        if($3=="buy"){
+                            obj[$2]+=$6
+                        }
+                        else{
+                            obj[$2]-=$6
+                        }
+                    }
+                    END{
+                        for (tkr in obj){
+                            addSpaceT=""
+                            addHis=""
+                            neg=0
+                            for (i=length(tkr);i<10;i++){
+                                addSpaceT=addSpaceT" "
+                            }
+                            val=lastPrice[tkr]*obj[tkr]
+                            if (val>0){
+                                for(i=0;i<val/1000;i++){
+                                addHis=addHis"#"
+                                }
+                            }
+                            else{
+                                for(i=0;i>val/1000;i--){
+                                    addHis=addHis"!"
+                                }
+                            }
+                            printf("%s%s: %s\n",tkr,addSpaceT,addHis)
+                        }
+                    }'|sort -t ":" -n -k2 -r)
+                else
+                graphPos=$(echo "$outLogs"|sort -t ";" -r -d|\
+                awk -F ';' \
+                -v width="$width"\
+                '{
+                    if(a[$2]++ == 0 ){
+                        lastPrice[$2]+=$4
+                    }
+                    if($3=="buy"){
+                        obj[$2]+=$6
+                    }
+                    else{
+                        obj[$2]-=$6
+                    }
+                }
+                END{
+                    maxVal=0
+                    for(tkr in obj){
+                        val=lastPrice[tkr]*obj[tkr]
+                        val=(val < 0) ? -val : val
+                        if(maxVal<val){
+                            maxVal=val 
+                        }
+                    }
+                    for (tkr in obj){
+                        addSpaceT=""
+                            addHis=""
+                            neg=0
+                            for (i=length(tkr);i<10;i++){
+                                addSpaceT=addSpaceT" "
+                            }
+                            val=lastPrice[tkr]*obj[tkr]
+                            if(val<0){
+                                val=-val
+                                neg=1
+                            }
+                            else{
+                                neg=0
+                            }
+                            val=(val/maxVal)*width
+                            val=val-0.5
+                            if (neg){
+                                for(i=0;i<val;++i){
+                                    addHis=addHis"!"
+                                }
+                            }
+                            else{
+                                for(i=0;i<val;i++){
+                                addHis=addHis"#"
+                                }
+                            }
+                            printf("%s%s: %s\n",tkr,addSpaceT,addHis)
+                    }
+                }'|sort -t ":" -d)
+                fi
+                outLogs="$graphPos"
+                shift
+                ;;
+            *)     
+                print  
+                shift
+                ;;          
+    esac
+done
+###################
+#     FINISH      #
+###################
+echo "$outLogs"
+
+
+
+
+
+

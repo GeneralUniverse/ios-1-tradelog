@@ -1,3 +1,4 @@
+points: 10/10
 ## Project to IOS - operating system oriented course, mainly linux
 ##### Program filters and make operations on stocks log
 ###### Program can do following operations: 
